@@ -1,0 +1,80 @@
+cat << 'EOF' > /tmp/install-docker-kali.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+need_root() { [ "$EUID" -eq 0 ] || { echo "✋ Ejecuta como root o con sudo."; exit 1; }; }
+msg(){ echo -e "\n==> $*"; }
+
+need_root
+
+# 0) Detectar base Debian (bookworm/bullseye) para Kali
+msg "Detectando base Debian…"
+DEBIAN_CODENAME=""
+if grep -qi 'VERSION_CODENAME=' /etc/os-release; then
+  DEBIAN_CODENAME="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
+fi
+# Si devuelve kali-rolling u otra cosa, inferimos por versión de Debian
+if [[ -z "$DEBIAN_CODENAME" || "$DEBIAN_CODENAME" == "kali-rolling" ]]; then
+  DEB_VER="$(cut -d'.' -f1 < /etc/debian_version 2>/dev/null || echo "")"
+  case "$DEB_VER" in
+    12) DEBIAN_CODENAME="bookworm" ;;
+    11) DEBIAN_CODENAME="bullseye" ;;
+    *)  DEBIAN_CODENAME="bookworm" ;; # por defecto
+  esac
+fi
+msg "Usando repositorio de Docker para Debian: ${DEBIAN_CODENAME}"
+
+# 1) Dependencias básicas
+msg "Instalando dependencias…"
+apt update
+apt install -y ca-certificates curl gnupg lsb-release
+
+# 2) Limpiar repos previos de Docker (si existen)
+msg "Limpiando repos Docker previos…"
+rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.list.save || true
+mkdir -p /etc/apt/keyrings
+
+# 3) Clave GPG oficial de Docker
+msg "Agregando clave GPG de Docker…"
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+# 4) Repo oficial de Docker apuntando a Debian correcto
+msg "Creando /etc/apt/sources.list.d/docker.list…"
+ARCH="$(dpkg --print-architecture)"
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${DEBIAN_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+
+# 5) Instalar Docker (con fallback a docker.io si falla)
+msg "Actualizando índices e instalando Docker Engine…"
+if apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+  INSTALL_SOURCE="Docker (repo oficial)"
+else
+  msg "Fallo el repo oficial. Usando fallback: docker.io de Debian."
+  apt -y install docker.io || { echo "❌ No se pudo instalar docker.io"; exit 1; }
+  # Intentar plugin compose si existe en tu base
+  apt -y install docker-compose-plugin || true
+  INSTALL_SOURCE="docker.io (Debian)"
+fi
+
+# 6) Habilitar servicio y probar
+msg "Habilitando e iniciando el servicio docker…"
+systemctl enable --now docker
+
+msg "Probando hello-world…"
+if docker run --rm hello-world >/dev/null 2>&1; then
+  echo "✅ Docker funciona correctamente."
+else
+  echo "⚠️ Docker instalado pero la prueba hello-world falló. Revisa: journalctl -u docker -e"
+fi
+
+# 7) Agregar usuario al grupo docker (si corresponde)
+if [ -n "${SUDO_USER:-}" ]; then
+  msg "Agregando ${SUDO_USER} al grupo docker…"
+  usermod -aG docker "$SUDO_USER" || true
+  echo "ℹ️ Cierra y vuelve a entrar a sesión (o ejecuta: newgrp docker)."
+fi
+
+echo -e "\n✔ Instalación completada desde: ${INSTALL_SOURCE}"
+EOF
+
+sudo bash /tmp/install-docker-kali.sh
